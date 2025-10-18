@@ -3,6 +3,7 @@
 #include <ncurses.h>
 #include <string.h>
 #include <errno.h>
+#include <dirent.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <locale.h>
@@ -14,11 +15,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 #include <stdio.h>
+
+#include "tagger_lib.h"
 
 #define TOPBAR_MAX_LINES 6
 #define TITLE "Live Preview  •  [q]: quit  [↑/↓]: navigate  [s]: save"
@@ -67,20 +71,280 @@ static int SetFlags( int FileDescriptor, int OrFlags, int SetCloexec )
 }
 
 
+static TagDictionary Dict = { 0 };
+static char* CurrentTagRoot = NULL;
+
+static void FreeTagDictionary( TagDictionary* Dictionary )
+{
+    if( !Dictionary )
+        return;
+
+    if( Dictionary->Tags )
+    {
+        for( int Index = 0; Index < Dictionary->Count; ++Index )
+        {
+            free( Dictionary->Tags[Index].Name );
+            free( Dictionary->Tags[Index].Replacement );
+        }
+
+        free( Dictionary->Tags );
+    }
+
+    Dictionary->Tags = NULL;
+    Dictionary->Count = 0;
+}
+
+
+static bool EndsWithTagExtension( const char* Name )
+{
+    if( !Name )
+        return false;
+
+    const char* Dot = strrchr( Name, '.' );
+
+    if( !Dot )
+        return false;
+
+    return strcmp( Dot, ".tag" ) == 0;
+}
+
+
+static bool EnsureDirectoryExists( const char* Path )
+{
+    if( !Path )
+        return false;
+
+    struct stat Info;
+
+    if( stat( Path, &Info ) == 0 )
+        return S_ISDIR( Info.st_mode );
+
+    if( errno != ENOENT )
+        return false;
+
+    if( mkdir( Path, 0777 ) == 0 )
+        return true;
+
+    return errno == EEXIST;
+}
+
+
+static bool BuildTagDictionary( const char* RootDir, TagDictionary* Out )
+{
+    if( !RootDir || !Out )
+        return false;
+
+    struct stat RootInfo;
+
+    if( stat( RootDir, &RootInfo ) != 0 || !S_ISDIR( RootInfo.st_mode ) )
+        return false;
+
+    char TagDir[PATH_MAX];
+
+    if( snprintf( TagDir, sizeof TagDir, "%s/%s", RootDir, "tagdef" ) >= ( int )sizeof TagDir )
+        return false;
+
+    if( !EnsureDirectoryExists( TagDir ) )
+        return false;
+
+    DIR* Dir = opendir( TagDir );
+
+    if( !Dir )
+        return false;
+
+    TagDictionary Temp = { 0 };
+    struct dirent* Entry = NULL;
+
+    while( ( Entry = readdir( Dir ) ) != NULL )
+    {
+        if( Entry->d_name[0] == '.' )
+            continue;
+
+        if( !EndsWithTagExtension( Entry->d_name ) )
+            continue;
+
+        char FilePath[PATH_MAX];
+
+        if( snprintf( FilePath, sizeof FilePath, "%s/%s", TagDir, Entry->d_name ) >= ( int )sizeof FilePath )
+            continue;
+
+        struct stat FileInfo;
+
+        if( stat( FilePath, &FileInfo ) != 0 || !S_ISREG( FileInfo.st_mode ) )
+            continue;
+
+        FILE* File = fopen( FilePath, "rb" );
+
+        if( !File )
+            continue;
+
+        if( fseek( File, 0, SEEK_END ) != 0 )
+        {
+            fclose( File );
+            continue;
+        }
+
+        long Size = ftell( File );
+
+        if( Size < 0 )
+        {
+            fclose( File );
+            continue;
+        }
+
+        if( fseek( File, 0, SEEK_SET ) != 0 )
+        {
+            fclose( File );
+            continue;
+        }
+
+        char* Content = ( char* )malloc( ( size_t )Size + 1 );
+
+        if( !Content )
+        {
+            fclose( File );
+            continue;
+        }
+
+        size_t Read = fread( Content, 1, ( size_t )Size, File );
+
+        if( Read != ( size_t )Size && ferror( File ) )
+        {
+            free( Content );
+            fclose( File );
+            continue;
+        }
+
+        Content[Read] = '\0';
+        fclose( File );
+
+        const char* Dot = strrchr( Entry->d_name, '.' );
+        size_t NameLen = Dot ? ( size_t )( Dot - Entry->d_name ) : strlen( Entry->d_name );
+
+        char* Name = ( char* )malloc( NameLen + 1 );
+
+        if( !Name )
+        {
+            free( Content );
+            continue;
+        }
+
+        memcpy( Name, Entry->d_name, NameLen );
+        Name[NameLen] = '\0';
+
+        Tag* NewTags = ( Tag* )realloc( Temp.Tags, ( size_t )( Temp.Count + 1 ) * sizeof( Tag ) );
+
+        if( !NewTags )
+        {
+            free( Name );
+            free( Content );
+            continue;
+        }
+
+        Temp.Tags = NewTags;
+        Temp.Tags[Temp.Count].Name = Name;
+        Temp.Tags[Temp.Count].Replacement = Content;
+        ++Temp.Count;
+    }
+
+    closedir( Dir );
+    *Out = Temp;
+    return true;
+}
+
+
+static bool SetTagRootDirectory( const char* RootDir )
+{
+    if( !RootDir )
+        return false;
+
+    char Resolved[PATH_MAX];
+    const char* Effective = RootDir;
+
+    if( realpath( RootDir, Resolved ) )
+        Effective = Resolved;
+
+    if( CurrentTagRoot && strcmp( CurrentTagRoot, Effective ) == 0 )
+        return true;
+
+    TagDictionary Temp = { 0 };
+
+    if( !BuildTagDictionary( Effective, &Temp ) )
+        return false;
+
+    FreeTagDictionary( &Dict );
+    Dict = Temp;
+
+    free( CurrentTagRoot );
+    CurrentTagRoot = strdup( Effective );
+
+    return true;
+}
+
+
+static void CleanupTagCache( void )
+{
+    FreeTagDictionary( &Dict );
+    free( CurrentTagRoot );
+    CurrentTagRoot = NULL;
+}
+
+
+static char* ModifyFrameBuffer( const char* Buffer, size_t Len )
+{
+    if( !Buffer )
+        return NULL;
+
+    char* Input = ( char* )malloc( Len + 1 );
+
+    if( !Input )
+        return NULL;
+
+    if( Len )
+        memcpy( Input, Buffer, Len );
+
+    Input[Len] = '\0';
+
+    if( Dict.Count == 0 || strstr( Input, START_TAG ) == NULL )
+        return Input;
+
+    RecursionContext Ctx = { 0 };
+    char* Processed = ProcessInput( Input, &Ctx, &Dict );
+
+    free( Ctx.ActiveTags );
+
+    if( !Processed )
+        return Input;
+
+    free( Input );
+    return Processed;
+}
+
+
 static void UpdateFrame( struct Data* D, const char* Buffer, size_t Len )
 {
     if( !D )
         return;
 
-    char* NewFrame = ( char* )malloc( Len + 1 );
+    char* NewFrame = ModifyFrameBuffer( Buffer, Len );
+    size_t NewLen = Len;
 
     if( !NewFrame )
-        return;
+    {
+        NewFrame = ( char* )malloc( Len + 1 );
 
-    if( Len )
-        memcpy( NewFrame, Buffer, Len );
+        if( !NewFrame )
+            return;
 
-    NewFrame[Len] = '\0';
+        if( Len )
+            memcpy( NewFrame, Buffer, Len );
+
+        NewFrame[Len] = '\0';
+    }
+    else
+    {
+        NewLen = strlen( NewFrame );
+    }
 
     pthread_mutex_lock( &DataLock );
 
@@ -88,7 +352,7 @@ static void UpdateFrame( struct Data* D, const char* Buffer, size_t Len )
 
     free( D->Frame );
     D->Frame = NewFrame;
-    D->FrameLen = Len;
+    D->FrameLen = NewLen;
     D->Scroll = PreviousScroll;
     D->MaxScroll = 0;
     D->TotalLines = 0;
@@ -796,15 +1060,45 @@ static bool ResolveDefaultCommand( char* Buffer, size_t Size )
 
 int main( int argc, char* argv[] )
 {
+    const char* TagRootArg = NULL;
     int CommandIndex = 1;
 
-    if( argc > 1 && strcmp( argv[1], "--" ) == 0 )
-        CommandIndex = 2;
+    if( argc > 1 )
+    {
+        if( strcmp( argv[1], "--" ) != 0 )
+        {
+            struct stat RootInfo;
+
+            if( stat( argv[1], &RootInfo ) == 0 && S_ISDIR( RootInfo.st_mode ) )
+            {
+                TagRootArg = argv[1];
+                CommandIndex = 2;
+            }
+        }
+        else
+        {
+            CommandIndex = 2;
+        }
+    }
+
+    if( CommandIndex < argc && strcmp( argv[CommandIndex], "--" ) == 0 )
+        ++CommandIndex;
 
     char DefaultPath[PATH_MAX] = "";
     char* DefaultArgv[2] = { NULL, NULL };
     char* const* ChildArgv = NULL;
     const char* ChildPath = NULL;
+
+    atexit( CleanupTagCache );
+
+    char WorkingDir[PATH_MAX];
+    const char* TagRoot = TagRootArg;
+
+    if( !TagRoot && getcwd( WorkingDir, sizeof WorkingDir ) )
+        TagRoot = WorkingDir;
+
+    if( TagRoot && !SetTagRootDirectory( TagRoot ) )
+        fprintf( stderr, "warning: failed to load tag definitions from %s\n", TagRoot );
 
     if( CommandIndex >= argc )
     {
