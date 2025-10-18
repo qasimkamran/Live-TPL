@@ -76,6 +76,20 @@ local function ensure_mapping()
 end
 
 function M.send_current_buffer()
+    local buf = vim.api.nvim_get_current_buf()
+    local buftype = vim.api.nvim_buf_get_option( buf, "buftype" )
+    if buftype ~= "" then
+        return
+    end
+
+    local filetype = vim.api.nvim_buf_get_option( buf, "filetype" )
+    if filetype == "toggleterm"
+        or filetype == "NvimTree"
+        or filetype == "neo-tree"
+        or filetype == "vimtree" then
+        return
+    end
+
     if not ensure_mapping() then return end
     local Lines = vim.api.nvim_buf_get_lines( 0, 0, -1, true )
     local Text = table.concat( Lines, "\n")
@@ -106,4 +120,3 @@ function M.close()
 end
 
 return M
-

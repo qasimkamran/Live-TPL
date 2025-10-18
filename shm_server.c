@@ -71,9 +71,9 @@ int main( void )
             continue;
         }
 
-        fwrite( Ptr + 4, 1, Len, stdout );;
-        fputc( '\n', stdout );
-        fflush( stdout );
+        fwrite( Ptr + 4, 1, Len, stderr );
+        fputc( '\n', stderr );
+        fflush( stderr );
     }
 
     sem_close( Semaphore );
@@ -83,4 +83,3 @@ int main( void )
 
     return 0;
 }
-

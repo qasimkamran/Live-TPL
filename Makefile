@@ -12,7 +12,7 @@ LIB := $(BIN_DIR)/lib$(LIB_NAME).a
 LIB_SRCS := $(wildcard $(SRC_DIR)/*_lib.c)
 LIB_OBJS := $(patsubst $(SRC_DIR)/%.c,$(BIN_DIR)/%.o,$(LIB_SRCS))
 
-LDLIBS += -lm
+LDLIBS += -lm -lncursesw -lpthread
 
 # Script/executable sources: all .c files except *_lib.c
 SCRIPT_SRCS := $(filter-out $(LIB_SRCS),$(wildcard $(SRC_DIR)/*.c))
