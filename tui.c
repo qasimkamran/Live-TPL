@@ -6,6 +6,7 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <stdint.h>
 #include <locale.h>
 #include <poll.h>
 #include <pthread.h>
@@ -192,6 +193,12 @@ static bool BuildTagDictionary( const char* RootDir, TagDictionary* Out )
             continue;
         }
 
+        if( ( uintmax_t )Size >= ( uintmax_t )SIZE_MAX )
+        {
+            fclose( File );
+            continue;
+        }
+
         if( fseek( File, 0, SEEK_SET ) != 0 )
         {
             fclose( File );
@@ -232,7 +239,16 @@ static bool BuildTagDictionary( const char* RootDir, TagDictionary* Out )
         memcpy( Name, Entry->d_name, NameLen );
         Name[NameLen] = '\0';
 
-        Tag* NewTags = ( Tag* )realloc( Temp.Tags, ( size_t )( Temp.Count + 1 ) * sizeof( Tag ) );
+        size_t NewCount = ( size_t )Temp.Count + 1;
+
+        if( NewCount > SIZE_MAX / sizeof( Tag ) )
+        {
+            free( Name );
+            free( Content );
+            break;
+        }
+
+        Tag* NewTags = ( Tag* )realloc( Temp.Tags, NewCount * sizeof( Tag ) );
 
         if( !NewTags )
         {
@@ -293,6 +309,9 @@ static void CleanupTagCache( void )
 static char* ModifyFrameBuffer( const char* Buffer, size_t Len )
 {
     if( !Buffer )
+        return NULL;
+
+    if( Len == SIZE_MAX )
         return NULL;
 
     char* Input = ( char* )malloc( Len + 1 );
